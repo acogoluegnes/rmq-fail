@@ -6,6 +6,7 @@ import org.junit.Before;
 import org.junit.Test;
 
 import java.io.IOException;
+import java.net.SocketException;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
@@ -150,8 +151,8 @@ public class RMQProblemTest {
         final String queue = UUID.randomUUID().toString();
         final long startTime = System.currentTimeMillis();
 
-        consumingConnection.addShutdownListener(cause -> handleHardShutdownException("Consuming Connection", cause));
-        producingConnection.addShutdownListener(cause -> handleHardShutdownException("Producing Connection", cause));
+        consumingConnection.addShutdownListener(cause -> handleShutdownException("Consuming Connection", cause));
+        producingConnection.addShutdownListener(cause -> handleShutdownException("Producing Connection", cause));
         registerRecoveryListener("Consuming Channel", consumingChannel);
         registerRecoveryListener("Consuming Connection", consumingConnection);
         registerRecoveryListener("Producing Channel", producingChannel);
