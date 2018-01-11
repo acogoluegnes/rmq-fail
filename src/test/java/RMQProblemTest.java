@@ -36,23 +36,44 @@ public class RMQProblemTest {
     public void setUp() throws Exception {
         final ConnectionFactory factory = new ConnectionFactory();
         factory.setAutomaticRecoveryEnabled(true);
+        factory.setTopologyRecoveryEnabled(true);
         factory.setHost("localhost");
 
         ackedMessages = new AtomicInteger(0);
         producerService = Executors.newSingleThreadExecutor();
-        producingConnection = (AutorecoveringConnection) factory.newConnection();
+        producingConnection = (AutorecoveringConnection) factory.newConnection("Producer Connection");
         producingChannel = (AutorecoveringChannel) producingConnection.createChannel();
-        consumingConnection = (AutorecoveringConnection) factory.newConnection();
+        consumingConnection = (AutorecoveringConnection) factory.newConnection("Consuming Connection");
         consumingChannel = (AutorecoveringChannel) consumingConnection.createChannel();
     }
 
     @After
-    public void tearDown() throws Exception {
+    public void tearDown() {
         producerService.shutdownNow();
-        consumingChannel.close();
-        consumingConnection.close();
-        producingChannel.close();
-        producingConnection.close();
+        closeChannelIfOpen(consumingChannel);
+        closeConnectionIfOpen(consumingConnection);
+        closeChannelIfOpen(producingChannel);
+        closeConnectionIfOpen(producingConnection);
+    }
+
+    private void closeConnectionIfOpen(Connection connection) {
+        if (connection.isOpen()) {
+            try {
+                connection.close();
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        }
+    }
+
+    private void closeChannelIfOpen(Channel channel) {
+        if (channel.isOpen()) {
+            try {
+                channel.close();
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        }
     }
 
     private void declareQueue(final Channel channel, final String queue) throws IOException {
