@@ -22,7 +22,7 @@ public class RMQProblemTest {
     private static final int QOS_PREFETCH = 64;
     private static final int NUM_MESSAGES_TO_PRODUCE = 10000;
     private static final int MESSAGE_PROCESSING_TIME_MS = 3000;
-    private static final long MAX_TIME_BEFORE_FAIL_MS = TimeUnit.SECONDS.toMillis(60);
+    private static final long MAX_TIME_BEFORE_FAIL_MS = TimeUnit.SECONDS.toMillis(240);
     private static final long QUEUE_TTL_MS = TimeUnit.MINUTES.toMillis(5);
 
     private AtomicInteger ackedMessages;
@@ -73,7 +73,14 @@ public class RMQProblemTest {
                 }));
     }
 
-    private void startConsumer(String queue) throws IOException {
+    private void handleHardShutdownException(final String type, ShutdownSignalException sig) {
+        if (sig.isHardError()) {
+            System.out.println("Hard shutdown occurred for " + type);
+            sig.printStackTrace();
+        }
+    }
+
+    private void startConsumer(final String queue) throws IOException {
         consumingChannel.basicConsume(queue, false, "", false, false, null, new DefaultConsumer(consumingChannel) {
             @Override
             public void handleRecoverOk(String consumerTag) {
@@ -90,6 +97,11 @@ public class RMQProblemTest {
                 } finally {
                     ackedMessages.incrementAndGet();
                 }
+            }
+
+            @Override
+            public void handleShutdownSignal(String consumerTag, ShutdownSignalException sig) {
+                handleHardShutdownException("Consuming Channel", sig);
             }
         });
 
@@ -115,6 +127,8 @@ public class RMQProblemTest {
         final String queue = UUID.randomUUID().toString();
         final long startTime = System.currentTimeMillis();
 
+        consumingConnection.addShutdownListener(cause -> handleHardShutdownException("Consuming Connection", cause));
+        producingConnection.addShutdownListener(cause -> handleHardShutdownException("Producing Connection", cause));
         registerRecoveryListener("Consuming Channel", consumingChannel);
         registerRecoveryListener("Consuming Connection", consumingConnection);
         registerRecoveryListener("Producing Channel", producingChannel);
