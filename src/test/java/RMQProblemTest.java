@@ -1,17 +1,17 @@
 import com.rabbitmq.client.*;
+import com.rabbitmq.client.impl.recovery.AutorecoveringChannel;
+import com.rabbitmq.client.impl.recovery.AutorecoveringConnection;
+import org.junit.After;
+import org.junit.Before;
 import org.junit.Test;
-import ratelimiter.ThrottlingExecutorService;
 
 import java.io.IOException;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.Random;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.IntStream;
 
@@ -19,57 +19,40 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.fail;
 
 public class RMQProblemTest {
-    private static final int NUM_WORKERS = 64;
     private static final int QOS_PREFETCH = 64;
     private static final int NUM_MESSAGES_TO_PRODUCE = 10000;
+    private static final int MESSAGE_PROCESSING_TIME_MS = 3000;
     private static final long MAX_TIME_BEFORE_FAIL_MS = TimeUnit.SECONDS.toMillis(60);
     private static final long QUEUE_TTL_MS = TimeUnit.MINUTES.toMillis(5);
-    private static final Random RANDOM_NUM_GEN = new Random();
 
-    private final ExecutorService ackerService = Executors.newSingleThreadExecutor();
-    private final ExecutorService producerService = Executors.newSingleThreadExecutor();
-//    private final ExecutorService workerService = Executors.newFixedThreadPool(NUM_WORKERS);
-    private final ExecutorService workerService = ThrottlingExecutorService.createExecutorService(1000, 10, TimeUnit.SECONDS);
+    private AtomicInteger ackedMessages;
+    private ExecutorService producerService;
+    private AutorecoveringConnection producingConnection;
+    private AutorecoveringChannel producingChannel;
+    private AutorecoveringConnection consumingConnection;
+    private AutorecoveringChannel consumingChannel;
 
-    private Runnable createAcker(final Channel channel, final AtomicInteger ackedMessages, final long deliveryTag, final boolean shouldRequeue) {
-        return () -> {
-            try {
-                if (shouldRequeue) {
-                    channel.basicReject(deliveryTag, true);
-                } else {
-                    channel.basicAck(deliveryTag, false);
+    @Before
+    public void setUp() throws Exception {
+        final ConnectionFactory factory = new ConnectionFactory();
+        factory.setAutomaticRecoveryEnabled(true);
+        factory.setHost("localhost");
 
-                }
-            } catch (Exception e) {
-                e.printStackTrace();
-            } finally {
-                if (!shouldRequeue) {
-                    ackedMessages.incrementAndGet();
-                }
-            }
-        };
+        ackedMessages = new AtomicInteger(0);
+        producerService = Executors.newSingleThreadExecutor();
+        producingConnection = (AutorecoveringConnection) factory.newConnection();
+        producingChannel = (AutorecoveringChannel) producingConnection.createChannel();
+        consumingConnection = (AutorecoveringConnection) factory.newConnection();
+        consumingChannel = (AutorecoveringChannel) consumingConnection.createChannel();
     }
 
-    private Runnable createWorker(final Channel channel, final AtomicInteger ackedMessages, final Envelope envelope) {
-        return () -> {
-            try {
-                Thread.sleep(100);
-                ackerService.submit(createAcker(channel, ackedMessages, envelope.getDeliveryTag(), RANDOM_NUM_GEN.nextInt(100) > 1));
-            } catch (Exception e) {
-                e.printStackTrace();
-            }
-        };
-    }
-
-    private Runnable createProducer(final Channel channel, final String queue) {
-        return () -> IntStream.range(0, NUM_MESSAGES_TO_PRODUCE)
-                .forEach(x -> {
-                    try {
-                        channel.basicPublish("", queue, null, ("MSG NUM" + x).getBytes());
-                    } catch (IOException e) {
-                        e.printStackTrace();
-                    }
-                });
+    @After
+    public void tearDown() throws Exception {
+        producerService.shutdownNow();
+        consumingChannel.close();
+        consumingConnection.close();
+        producingChannel.close();
+        producingConnection.close();
     }
 
     private void declareQueue(final Channel channel, final String queue) throws IOException {
@@ -78,24 +61,20 @@ public class RMQProblemTest {
         channel.queueDeclare(queue, true, false, false, queueArguments);
     }
 
-    @Test
-    public void shouldNotFail() throws IOException, TimeoutException {
-        final ConnectionFactory factory = new ConnectionFactory();
-        final String queue = UUID.randomUUID().toString();
-        final long startTime = System.currentTimeMillis();
-        factory.setHost("localhost");
+    private void produceMessagesInBackground(final Channel channel, final String queue) {
+        final AMQP.BasicProperties properties = new AMQP.BasicProperties.Builder().deliveryMode(2).build();
+        producerService.execute(() -> IntStream.range(0, NUM_MESSAGES_TO_PRODUCE)
+                .forEach(x -> {
+                    try {
+                        channel.basicPublish("", queue, false, properties, ("MSG NUM" + x).getBytes());
+                    } catch (IOException e) {
+                        e.printStackTrace();
+                    }
+                }));
+    }
 
-        final Connection producingConnection = factory.newConnection();
-        final Channel producingChannel = producingConnection.createChannel();
-        declareQueue(producingChannel, queue);
-        producerService.execute(createProducer(producingChannel, queue));
-
-        final Connection consumingConnection = factory.newConnection();
-        final Channel consumingChannel = consumingConnection.createChannel();
-        final AtomicBoolean isFirstMessage = new AtomicBoolean(false);
-        final AtomicInteger ackedMessages = new AtomicInteger(0);
-
-        consumingChannel.basicConsume(queue, false, new DefaultConsumer(consumingChannel) {
+    private void startConsumer(String queue) throws IOException {
+        consumingChannel.basicConsume(queue, false, "", false, false, null, new DefaultConsumer(consumingChannel) {
             @Override
             public void handleRecoverOk(String consumerTag) {
                 System.out.println("Recovering. This doesn't get logged!!!");
@@ -103,23 +82,47 @@ public class RMQProblemTest {
 
             @Override
             public void handleDelivery(String consumerTag, Envelope envelope, AMQP.BasicProperties properties, byte[] body) {
-                if (!isFirstMessage.getAndSet(true)) {
-                    try {
-                        Thread.sleep(100);
-                    } catch (InterruptedException e) {
-                        e.printStackTrace();
-                    }
+                try {
+                    Thread.sleep(MESSAGE_PROCESSING_TIME_MS);
+                    consumingChannel.basicAck(envelope.getDeliveryTag(), false);
+                } catch (Exception e) {
+                    e.printStackTrace();
+                } finally {
+                    ackedMessages.incrementAndGet();
                 }
-                workerService.execute(createWorker(consumingChannel, ackedMessages, envelope));
             }
         });
 
-        try {
-            Thread.sleep(500);
-        } catch (InterruptedException e) {
-            e.printStackTrace();
-        }
         consumingChannel.basicQos(QOS_PREFETCH);
+    }
+
+    private void registerRecoveryListener(final String type, final Recoverable recoverable) {
+        recoverable.addRecoveryListener(new RecoveryListener() {
+            @Override
+            public void handleRecovery(Recoverable recoverable) {
+                System.out.println("Recovery finished for " + type + " " + recoverable);
+            }
+
+            @Override
+            public void handleRecoveryStarted(Recoverable recoverable) {
+                System.out.println("Recovery Started for " + type + " " + recoverable);
+            }
+        });
+    }
+
+    @Test
+    public void failureAndRecovery() throws IOException {
+        final String queue = UUID.randomUUID().toString();
+        final long startTime = System.currentTimeMillis();
+
+        registerRecoveryListener("Consuming Channel", consumingChannel);
+        registerRecoveryListener("Consuming Connection", consumingConnection);
+        registerRecoveryListener("Producing Channel", producingChannel);
+        registerRecoveryListener("Producing Connection", producingConnection);
+
+        declareQueue(producingChannel, queue);
+        produceMessagesInBackground(producingChannel, queue);
+        startConsumer(queue);
 
         while (true) {
             final int numAckedMessages = ackedMessages.get();
@@ -129,7 +132,8 @@ public class RMQProblemTest {
                     break;
                 }
                 try {
-                    Thread.sleep(100);
+                    Thread.sleep(1000);
+                    System.out.println("Consumed so far - " + numAckedMessages);
                 } catch (InterruptedException e) {
                     e.printStackTrace();
                 }
