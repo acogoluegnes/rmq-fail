@@ -85,14 +85,18 @@ public class RMQProblemTest {
 
     private void produceMessagesInBackground(final Channel channel, final String queue) {
         final AMQP.BasicProperties properties = new AMQP.BasicProperties.Builder().deliveryMode(2).build();
-        producerService.execute(() -> IntStream.range(0, NUM_MESSAGES_TO_PRODUCE)
-                .forEach(x -> {
-                    try {
-                        channel.basicPublish("", queue, false, properties, ("MSG NUM" + x).getBytes());
-                    } catch (IOException e) {
-                        e.printStackTrace();
-                    }
-                }));
+        producerService.execute(() -> {
+            IntStream.range(0, NUM_MESSAGES_TO_PRODUCE)
+                    .forEach(x -> {
+                        try {
+                            channel.basicPublish("", queue, false, properties, ("MSG NUM" + x).getBytes());
+                        } catch (IOException e) {
+                            e.printStackTrace();
+                        }
+                    });
+            closeChannelIfOpen(producingChannel);
+            closeConnectionIfOpen(producingConnection);
+        });
     }
 
     private void handleShutdownException(final String type, ShutdownSignalException sig) {
