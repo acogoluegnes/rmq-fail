@@ -94,8 +94,8 @@ public class RMQProblemTest {
                 }));
     }
 
-    private void handleHardShutdownException(final String type, ShutdownSignalException sig) {
-        if (sig.isHardError()) {
+    private void handleShutdownException(final String type, ShutdownSignalException sig) {
+        if (!sig.isInitiatedByApplication()) {
             System.out.println("Hard shutdown occurred for " + type);
             sig.printStackTrace();
         }
@@ -122,7 +122,7 @@ public class RMQProblemTest {
 
             @Override
             public void handleShutdownSignal(String consumerTag, ShutdownSignalException sig) {
-                handleHardShutdownException("Consuming Channel", sig);
+                handleShutdownException("Consuming Channel", sig);
             }
         });
 
