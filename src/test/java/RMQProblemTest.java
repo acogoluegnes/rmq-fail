@@ -113,6 +113,8 @@ public class RMQProblemTest {
                 try {
                     Thread.sleep(MESSAGE_PROCESSING_TIME_MS);
                     consumingChannel.basicAck(envelope.getDeliveryTag(), false);
+                } catch (SocketException e) {
+                    System.err.println("Problem acking message " + e.getMessage());
                 } catch (Exception e) {
                     e.printStackTrace();
                 } finally {
